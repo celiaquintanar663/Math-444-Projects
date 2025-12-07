@@ -1,0 +1,47 @@
+required <- c("data.table","dplyr","ggplot2","scales")
+installed <- rownames(installed.packages())
+for (p in required) if (! (p %in% installed)) install.packages(p)
+library(data.table); library(dplyr); library(ggplot2); library(scales)
+
+set.seed(2025)
+#read the data files
+train <- read.csv("train.csv")
+test  <- read.csv("test.csv")
+test_ids <- test$Id
+
+#check dim of each
+dim(train)
+dim(test)
+
+get_missing_counts <- function(df) {
+  sapply(df, function(x) sum(is.na(x)))
+}
+
+getmode <- function(v) {
+  v <- v[!is.na(v)]
+  if (length(v) == 0) return(NA)
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+#find missing columns
+miss_train_before <- sort(get_missing_counts(train), decreasing = TRUE)
+miss_test_before  <- sort(get_missing_counts(test), decreasing = TRUE)
+
+message("Top Missing from train:")
+print(head(miss_train_before[miss_train_before>0], 20))
+
+message("Top missing from test:")
+print(head(miss_test_before[miss_test_before>0], 20))
+
+#plots of top missing from train
+miss_df <- data.frame(
+  var = names(miss_train_before),
+  miss = as.numeric(miss_train_before)
+) %>% arrange(desc(miss)) %>% filter(miss > 0)
+
+if (nrow(miss_df) > 0) {
+  ggplot(miss_df[1:min(30,nrow(miss_df)),], aes(x = reorder(var, miss), y = miss)) +
+    geom_bar(stat="identity", fill="steelblue") + coord_flip() +
+    labs(title="Top missing counts (train)", x="", y="Missing count")
+}
