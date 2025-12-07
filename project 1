@@ -45,3 +45,194 @@ if (nrow(miss_df) > 0) {
     geom_bar(stat="identity", fill="steelblue") + coord_flip() +
     labs(title="Top missing counts (train)", x="", y="Missing count")
 }
+#seperate numerical/catagorical
+train <- train %>% mutate(across(where(is.character), ~ as.factor(.)))
+test  <- test  %>% mutate(across(where(is.character), ~ as.factor(.)))
+cat_vars <- names(train)[sapply(train, is.factor)]
+num_vars <- names(train)[sapply(train, is.numeric)]
+
+#garage
+garage_nums <- intersect(c("GarageYrBlt","GarageArea","GarageCars"), names(train))
+garage_cats <- intersect(c("GarageType","GarageFinish","GarageQual","GarageCond"), names(train))
+
+for (v in garage_nums) {
+  train[[v]][is.na(train[[v]])] <- 0
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- 0
+}
+for (v in garage_cats) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]]  <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+#basement
+bsmt_cats <- intersect(c("BsmtQual","BsmtCond","BsmtExposure","BsmtFinType1","BsmtFinType2"), names(train))
+bsmt_nums <- intersect(c("BsmtFinSF1","BsmtFinSF2","BsmtUnfSF","TotalBsmtSF","BsmtFullBath","BsmtHalfBath"), names(train))
+
+for (v in bsmt_cats) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]]  <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+for (v in bsmt_nums) {
+  train[[v]][is.na(train[[v]])] <- 0
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- 0
+}
+
+#Fireplace, Pool, Fence, MiscFeature
+other_absent <- intersect(c("FireplaceQu","PoolQC","Fence","MiscFeature","Alley","MasVnrType"), names(train))
+for (v in other_absent) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]]  <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+#MasVnrArea
+if ("MasVnrArea" %in% names(train)) {
+  # For train
+  idx_none <- which(tolower(as.character(train$MasVnrType)) %in% c("none","absent"))
+  train$MasVnrArea[idx_none] <- 0
+  # For test
+  if ("MasVnrType" %in% names(test)) {
+    idx_none_t <- which(tolower(as.character(test$MasVnrType)) %in% c("none","absent"))
+    test$MasVnrArea[idx_none_t] <- 0
+  }
+}
+#LotFrontage 
+if ("LotFrontage" %in% names(train) & "Neighborhood" %in% names(train)) {
+  # compute medians in train by neighborhood
+  lf_meds <- train %>% group_by(Neighborhood) %>% summarize(med = median(LotFrontage, na.rm = TRUE))
+  for (i in 1:nrow(train)) {
+    if (is.na(train$LotFrontage[i])) {
+      nb <- as.character(train$Neighborhood[i])
+      medv <- lf_meds$med[lf_meds$Neighborhood == nb]
+      train$LotFrontage[i] <- ifelse(is.na(medv) | length(medv)==0, median(train$LotFrontage, na.rm=TRUE), medv)
+    }
+  }
+
+#test
+for (i in 1:nrow(test)) {
+    if (is.na(test$LotFrontage[i])) {
+      nb <- as.character(test$Neighborhood[i])
+      medv <- lf_meds$med[lf_meds$Neighborhood == nb]
+      test$LotFrontage[i] <- ifelse(is.na(medv) | length(medv)==0, median(train$LotFrontage, na.rm=TRUE), medv)
+    }
+  }
+}
+
+#Electrical
+if ("Electrical" %in% names(train)) {
+  mode_elec <- getmode(as.character(train$Electrical))
+  train$Electrical[is.na(train$Electrical)] <- mode_elec
+  if ("Electrical" %in% names(test)) test$Electrical[is.na(test$Electrical)] <- mode_elec
+}
+#remainders/rest
+train <- train %>% mutate(across(where(is.character), as.factor))  # ensure factors again
+cat_vars <- names(train)[sapply(train, is.factor)]
+num_vars <- names(train)[sapply(train, is.numeric)]
+#catagory
+for (v in cat_vars) {
+  if (any(is.na(train[[v]]))) {
+    mv <- getmode(as.character(train[[v]]))
+    if (is.na(mv)) mv <- "Absent"
+    train[[v]][is.na(train[[v]])] <- mv
+  }
+  if (v %in% names(test) && any(is.na(test[[v]]))) {
+    mv <- getmode(as.character(train[[v]]))  # use train's mode
+    if (is.na(mv)) mv <- "Absent"
+    test[[v]][is.na(test[[v]])] <- mv
+  }
+}
+#numeric
+for (v in num_vars) {
+  medv <- median(train[[v]], na.rm = TRUE)
+  if (is.na(medv)) medv <- 0
+  if (any(is.na(train[[v]]))) train[[v]][is.na(train[[v]])] <- medv
+  if (v %in% names(test) && any(is.na(test[[v]]))) test[[v]][is.na(test[[v]])] <- medv
+}
+
+#confirm no more missing entries
+total_missing_train <- sum(is.na(train))
+total_missing_test  <- sum(is.na(test))
+total_missing_train
+total_missing_test
+
+#only do numeric for pca
+if (!("SalePrice" %in% names(train))) stop("SalePrice missing from train!")
+train$logSale <- log(train$SalePrice)
+num_preds <- names(train)[sapply(train, is.numeric)]
+num_preds <- setdiff(num_preds, c("Id","SalePrice","logSale"))
+length(num_preds)
+train_num <- train[, num_preds]
+test_num  <- test[, intersect(num_preds, names(test))]
+for (v in setdiff(names(train_num), names(test_num))) {
+  test_num[[v]] <- median(train_num[[v]], na.rm = TRUE)
+}
+test_num <- test_num[, colnames(train_num)]
+train_num_scaled <- scale(train_num, center = TRUE, scale = TRUE)
+test_num_scaled  <- scale(test_num, center = attr(train_num_scaled, "scaled:center"),
+                          scale = attr(train_num_scaled, "scaled:scale"))
+#apply PCA
+pca_fit <- prcomp(train_num_scaled, center = FALSE, scale. = FALSE)
+var_explained <- pca_fit$sdev^2 / sum(pca_fit$sdev^2)
+cumvar <- cumsum(var_explained)
+
+#pca var plot cuml.
+ggplot(scree_df, aes(x = PC, y = CumVar)) + geom_line() + geom_point() +
+  labs(title = "PCA Cumulative variance", x = "Number of components", y = "Cumulative variance explained")
+#choosing how many PC's
+prop_var <- var_explained / sum(var_explained)
+pc_table <- data.frame(
+  PC = paste0("PC", 1:length(prop_var)),
+  Variance_Explained = round(prop_var, 4),
+  Cumulative_Explained = round(cumvar, 4)
+)
+print(pc_table)
+#chose 27 PCs
+train_pcs <- as.data.frame(pca_fit$x[, 1:27, drop = FALSE])
+colnames(train_pcs) <- paste0("PC", 1:ncol(train_pcs))
+train_pcs$logSale <- train$logSale
+
+formula_pcs <- as.formula(paste("logSale ~", paste(colnames(train_pcs)[1:27], collapse = " + ")))
+lm_pcs <- lm(formula_pcs, data = train_pcs)
+summary(lm_pcs)
+
+#forgot dim, so doing so now
+pca_fit <- prcomp(train_num_scaled, center = FALSE, scale. = FALSE)
+all_pcs <- pca_fit$x
+print(dim(all_pcs))
+pcs_27 <- pca_fit$x[, 1:27, drop = FALSE]
+print(dim(pcs_27))
+
+#this part and out might be wrong and missing information
+test_pcs_scores <- predict(pca_fit, newdata = test_num_scaled)[, 1:27, drop = FALSE]
+test_pcs <- as.data.frame(test_pcs_scores)
+colnames(test_pcs) <- paste0("PC", 1:ncol(test_pcs))
+
+#predict/submission
+pred_log_test <- predict(lm_pcs, newdata = test_pcs)
+pred_price_test <- exp(pred_log_test)
+
+submission <- data.frame(Id = test_ids, SalePrice = as.numeric(pred_price_test))
+write.csv(submission, "submission_pca.csv", row.names = FALSE)
+nrow(submission)
+
+#predicted vs original
+train_pred_log <- predict(lm_pcs, newdata = train_pcs)
+train_rmse_log <- sqrt(mean((train_pred_log - train_pcs$logSale)^2))
+#RMSE on log scale for train
+round(train_rmse_log, 6)
+#plot
+ggplot(data.frame(obs = train_pcs$logSale, pred = train_pred_log), aes(x = obs, y = pred)) +
+  geom_point(alpha=0.4) + geom_abline(slope=1, intercept=0, color="red") +
+  labs(title="Predicted vs Observed (logSale) - PCA model", x="Observed log(SalePrice)", y="Predicted log(SalePrice)")
+
+#incorecct????
+head(submission)
