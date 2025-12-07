@@ -1,0 +1,255 @@
+required <- c("data.table", "dplyr", "ggplot2", "scales", "kknn")
+installed <- rownames(installed.packages())
+for (p in required) if (! (p %in% installed)) install.packages(p)
+library(data.table)
+library(dplyr)
+library(ggplot2)
+library(scales)
+library(kknn)
+
+set.seed(2025)
+# read the data files
+train <- read.csv("train.csv")
+test <- read.csv("test.csv")
+test_ids <- test$Id
+
+# check dim of each
+dim(train)
+dim(test)
+
+get_missing_counts <- function(df) {
+  sapply(df, function(x) sum(is.na(x)))
+}
+
+getmode <- function(v) {
+  v <- v[!is.na(v)]
+  if (length(v) == 0) return(NA)
+  uniqv <- unique(v)
+  uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# find missing columns
+miss_train_before <- sort(get_missing_counts(train), decreasing = TRUE)
+message("Top Missing from train:")
+print(head(miss_train_before[miss_train_before > 0], 20))
+
+# preprocessing data
+
+# Initial factor conversion
+train <- train %>% mutate(across(where(is.character), ~ as.factor(.)))
+test <- test %>% mutate(across(where(is.character), ~ as.factor(.)))
+cat_vars <- names(train)[sapply(train, is.factor)]
+num_vars <- names(train)[sapply(train, is.numeric)]
+
+# Garage Imputation
+garage_nums <- intersect(c("GarageYrBlt", "GarageArea", "GarageCars"), names(train))
+garage_cats <- intersect(c("GarageType", "GarageFinish", "GarageQual", "GarageCond"), names(train))
+for (v in garage_nums) {
+  train[[v]][is.na(train[[v]])] <- 0
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- 0
+}
+for (v in garage_cats) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]] <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+
+# Basement Imputation
+bsmt_cats <- intersect(c("BsmtQual", "BsmtCond", "BsmtExposure", "BsmtFinType1", "BsmtFinType2"), names(train))
+bsmt_nums <- intersect(c("BsmtFinSF1", "BsmtFinSF2", "BsmtUnfSF", "TotalBsmtSF", "BsmtFullBath", "BsmtHalfBath"), names(train))
+for (v in bsmt_cats) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]] <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+for (v in bsmt_nums) {
+  train[[v]][is.na(train[[v]])] <- 0
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- 0
+}
+
+# Fireplace, Pool, Fence, MiscFeature, Alley, MasVnrType Imputation
+other_absent <- intersect(c("FireplaceQu", "PoolQC", "Fence", "MiscFeature", "Alley", "MasVnrType"), names(train))
+for (v in other_absent) {
+  train[[v]] <- as.character(train[[v]])
+  test[[v]] <- as.character(test[[v]])
+  train[[v]][is.na(train[[v]])] <- "Absent"
+  if (v %in% names(test)) test[[v]][is.na(test[[v]])] <- "Absent"
+  train[[v]] <- as.factor(train[[v]])
+  if (v %in% names(test)) test[[v]] <- as.factor(test[[v]])
+}
+
+# MasVnrArea Imputation
+if ("MasVnrArea" %in% names(train)) {
+  idx_none <- which(tolower(as.character(train$MasVnrType)) %in% c("none", "absent"))
+  train$MasVnrArea[idx_none] <- 0
+  if ("MasVnrType" %in% names(test)) {
+    idx_none_t <- which(tolower(as.character(test$MasVnrType)) %in% c("none", "absent"))
+    test$MasVnrArea[idx_none_t] <- 0
+  }
+}
+
+# LotFrontage Imputation (by Neighborhood median)
+if ("LotFrontage" %in% names(train) & "Neighborhood" %in% names(train)) {
+  lf_meds <- train %>% group_by(Neighborhood) %>% summarize(med = median(LotFrontage, na.rm = TRUE))
+  for (i in 1:nrow(train)) {
+    if (is.na(train$LotFrontage[i])) {
+      nb <- as.character(train$Neighborhood[i])
+      medv <- lf_meds$med[lf_meds$Neighborhood == nb]
+      train$LotFrontage[i] <- ifelse(is.na(medv) | length(medv) == 0, median(train$LotFrontage, na.rm = TRUE), medv)
+    }
+  }
+  for (i in 1:nrow(test)) {
+    if (is.na(test$LotFrontage[i])) {
+      nb <- as.character(test$Neighborhood[i])
+      medv <- lf_meds$med[lf_meds$Neighborhood == nb]
+      test$LotFrontage[i] <- ifelse(is.na(medv) | length(medv) == 0, median(train$LotFrontage, na.rm = TRUE), medv)
+    }
+  }
+}
+
+# Electrical Imputation (by Mode)
+if ("Electrical" %in% names(train)) {
+  mode_elec <- getmode(as.character(train$Electrical))
+  train$Electrical[is.na(train$Electrical)] <- mode_elec
+  if ("Electrical" %in% names(test)) test$Electrical[is.na(test$Electrical)] <- mode_elec
+}
+
+# Remaining Imputation (Robust Factor Handling)
+train <- train %>% mutate(across(where(is.character), as.factor)) # ensure factors again
+test <- test %>% mutate(across(where(is.character), as.factor)) # ensure factors again
+cat_vars <- names(train)[sapply(train, is.factor)]
+num_vars <- names(train)[sapply(train, is.numeric)]
+
+# Impute remaining categorical variables using Mode
+for (v in cat_vars) {
+  # Calculate mode from train data
+  mv <- getmode(as.character(train[[v]]))
+  if (is.na(mv)) mv <- "Absent"
+
+  # Impute train data
+  if (any(is.na(train[[v]]))) {
+    train[[v]][is.na(train[[v]])] <- mv
+  }
+
+  # Impute test data
+  if (v %in% names(test) && any(is.na(test[[v]]))) {
+    # Temporarily convert test variable to character
+    test[[v]] <- as.character(test[[v]])
+
+    # Impute missing values in test
+    test[[v]][is.na(test[[v]])] <- mv
+
+    # Convert back to factor, aligning levels with the training data
+    test[[v]] <- factor(test[[v]], levels = unique(c(levels(train[[v]]), mv)))
+  }
+}
+
+# Impute remaining numeric variables using Median
+for (v in num_vars) {
+  medv <- median(train[[v]], na.rm = TRUE)
+  if (is.na(medv)) medv <- 0
+  if (any(is.na(train[[v]]))) train[[v]][is.na(train[[v]])] <- medv
+  if (v %in% names(test) && any(is.na(test[[v]]))) test[[v]][is.na(test[[v]])] <- medv
+}
+
+# Final check missing entries
+total_missing_train <- sum(is.na(train))
+total_missing_test <- sum(is.na(test))
+message(paste("\nTotal Missing Entries after Final Imputation: Train=", total_missing_train, ", Test=", total_missing_test))
+
+# Principal Component Analysis
+
+if (!("SalePrice" %in% names(train))) stop("SalePrice missing from train!")
+train$logSale <- log(train$SalePrice)
+num_preds <- names(train)[sapply(train, is.numeric)]
+num_preds <- setdiff(num_preds, c("Id", "SalePrice", "logSale"))
+train_num <- train[, num_preds]
+test_num <- test[, intersect(num_preds, names(test))]
+
+# Align test columns
+for (v in setdiff(names(train_num), names(test_num))) {
+  test_num[[v]] <- median(train_num[[v]], na.rm = TRUE)
+}
+test_num <- test_num[, colnames(train_num)]
+
+# Scale data
+train_num_scaled <- scale(train_num, center = TRUE, scale = TRUE)
+test_num_scaled <- scale(test_num, center = attr(train_num_scaled, "scaled:center"),
+                         scale = attr(train_num_scaled, "scaled:scale"))
+
+# Apply PCA
+pca_fit <- prcomp(train_num_scaled, center = FALSE, scale. = FALSE)
+n_comp <- 27 # Using 27 PCs
+
+train_pcs <- as.data.frame(pca_fit$x[, 1:n_comp, drop = FALSE])
+colnames(train_pcs) <- paste0("PC", 1:ncol(train_pcs))
+train_pcs$logSale <- train$logSale
+
+# Prepare test PCs
+test_pcs_scores <- predict(pca_fit, newdata = test_num_scaled)[, 1:n_comp, drop = FALSE]
+test_pcs <- as.data.frame(test_pcs_scores)
+colnames(test_pcs) <- paste0("PC", 1:ncol(test_pcs))
+
+# fitting a linear regression model to compare 
+
+formula_pcs <- as.formula(paste("logSale ~", paste(colnames(train_pcs)[1:n_comp], collapse = " + ")))
+lm_pcs <- lm(formula_pcs, data = train_pcs)
+message("\nSummary of Linear Model with 27 PCs:")
+print(summary(lm_pcs))
+
+train_pred_log_lm <- predict(lm_pcs, newdata = train_pcs)
+train_rmse_log_lm <- sqrt(mean((train_pred_log_lm - train_pcs$logSale)^2))
+message(paste("Linear Model Train Log-RMSE:", round(train_rmse_log_lm, 6)))
+
+# KNN nonlinear regression model
+
+message("\n--- Running K-Nearest Neighbors Regression ---")
+
+formula_knn <- as.formula(paste("logSale ~", paste(colnames(train_pcs)[1:n_comp], collapse = " + ")))
+K_value <- 10
+
+# Train the KNN model using kknn (predicts test set simultaneously)
+knn_model <- kknn(
+  formula = formula_knn,
+  train = train_pcs,
+  test = test_pcs,
+  k = K_value,
+  kernel = "inv" 
+)
+
+# Predict on training data to calculate RMSE
+train_pred_log_knn_raw <- kknn(
+  formula = formula_knn,
+  train = train_pcs,
+  test = train_pcs,
+  k = K_value,
+  kernel = "inv"
+)
+train_pred_log_knn <- train_pred_log_knn_raw$fitted.values
+train_rmse_log_knn <- sqrt(mean((train_pred_log_knn - train_pcs$logSale)^2))
+message(paste("KNN Train Log-RMSE (K=", K_value, "):", round(train_rmse_log_knn, 6)))
+
+# KNN diagnostics
+
+# Plot Predicted vs Observed (KNN)
+plot_knn <- ggplot(data.frame(obs = train_pcs$logSale, pred = train_pred_log_knn), aes(x = obs, y = pred)) +
+  geom_point(alpha=0.4, color="darkblue") +
+  geom_abline(slope=1, intercept=0, color="red") +
+  labs(title=paste("Predicted vs Observed (logSale) - KNN Model (K=", K_value, ")"),
+       x="Observed log(SalePrice)", y="Predicted log(SalePrice)")
+print(plot_knn)
+
+# writes on .csv file for Kaggle challenge submission using KNN predictions
+
+pred_log_test_knn <- knn_model$fitted.values
+pred_price_test_knn <- exp(pred_log_test_knn)
+submission_knn <- data.frame(Id = test_ids, SalePrice = as.numeric(pred_price_test_knn))
+write.csv(submission_knn, "submission_knn.csv", row.names = FALSE)
+message("\nSubmission file 'submission_knn.csv' created using KNN predictions.")
+print(head(submission_knn))
