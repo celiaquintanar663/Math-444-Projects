@@ -217,6 +217,7 @@ print(summary(pca_model))
 
 print("VIF PCA model")
 print(vif(pca_model))
+message("ERROR: Catagorical will not work with PCA. Vif indicates no high correlation between variables")
 
 plot(pca_model)
 
@@ -301,6 +302,7 @@ boxcox_model <- lm(update(pca_formula, Delay_BC ~ .), data = train)
 
 print("box cox on selected summary")
 print(summary(boxcox_model))
+plot(boxcox_model)
 results$BoxCox_Model <- evaluate_model(boxcox_model, test)
 
 
@@ -329,4 +331,4 @@ print("Chosen Predictors")
 print(setdiff(names(coef(best_final_model)), "(Intercept)"))
 
 best_preds <- predict(best_final_model, newdata=test)
-plot(test$Delay_days, best_preds)
+plot(best_preds)
